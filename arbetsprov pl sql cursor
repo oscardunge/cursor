@@ -1,0 +1,1122 @@
+DROP VIEW org_kontorvy;
+
+/* Formatted on 2017-10-13 10:26:02 (QP5 v5.139.911.3011) */
+CREATE OR REPLACE FORCE VIEW org_kontorvy
+(
+   KONTOR_KOD,
+   KONTOR_BESKR,
+   ARBMOMR,
+   ARBMOMR_BESKR,
+   MARKNADSOMR,
+   MARKNADSOMR_BESKR
+)
+AS
+   SELECT a.kontor_kod,
+          a.kontor_beskr,
+          b.arbmomr,
+          b.arbmomr_beskr,
+          c.marknadsomr,
+          c.marknadsomr_beskr
+     --     FROM martman.vf_aktuell_kontor_vy a,
+     FROM martman.los_vf_kontor_vy a,
+          martman.vf_aktuell_arbmomr_vy b,
+          martman.vf_aktuell_marknadsomr_vy c,
+          martman.arbmomr_kontor d
+    WHERE     a.kontor_id = d.kontor_id
+          AND d.arbmomr = b.arbmomr
+          AND b.marknadsomr = c.marknadsomr
+
+;
+
+--OBS
+--OBS ändra datum för körningen  i första where satsen nedan, om man inte vill ha substr(add_months(sysdate,-1),1,7) 
+--OBS 
+--OBS råkar du köra en månad mer än en gång raderas detta månadsresultat för körningen ur resultattabellen ipsu_6, 
+--på rad 67, innan det nya resultatet för månaden , insert into ipsu_6 dvs sätt in 
+
+
+--test för att se vilken månad du kommer i första where satsen nedan --select substr(add_months(sysdate,-4),1,7) from dual 
+--resultattabell, trunkera den om man måste köra om allt 
+--truncate table IPSU_6;
+--select period, tjanst, count(*), count(distinct person_id), sum(UNIK_NY_PER_MAN), sum( kvar), sum( lamnat) from IPSU_6 where tjanst = 'A003' group by period, tjanst  union all select period, tjanst, count(*), count(distinct person_id), sum(UNIK_NY_PER_MAN), sum( kvar), sum( lamnat) from IPSU_6 where tjanst = 'A004' group by period, tjanst order by 2,1
+--select period, count(*) from ipsu_6 group by period order by 1
+
+
+--ny kvar lämnat per ärende (inte unika personer per månad och 2 tjänster)  
+-- hela skriptet körs en gång i månaden. Till och med  tabell IPSU_6 så hanteras bara en månads data (för snabbhet/lätthet) 
+drop table ipsu_1 purge; 
+
+create table ipsu_1 as
+
+select period,  a.arendelnr, a.person_id, a.spar_kod, B.EKA_KATJANSTAVTALLNR  , koen, A.BESLKONTOR_KOD,
+            (case 
+            when substr(A.START_DAT,1,7) = period then a.start_dat --se till att startdatumet givet att man är ny, ligger i månaden (behövs för att räkna ut deltagar dagar) 
+            else to_date(a.period||'-01','YYYY-MM-DD')  
+            end
+            ) as START_DAT, 
+            (case 
+            when a.avslutat = 'J' and substr(a.avslut_dat,1,7) = a.period then avslut_dat 
+            when a.avslutat = 'J' and substr(a.avslut_dat,1,7) < a.period then to_date(a.period||'-01','YYYY-MM-DD') --se till att slutdatumet eller avslutdatumet  givet att man lämnar ligger i månaden (behövs för att räkna ut deltagardagar)
+            when a.pagaende = 'J' then  last_day(to_date(a.period||'-01','YYYY-MM-DD')) 
+            else null  
+            end
+            ) as avslut_dat, 
+a.UTBILDNINGSTILLFALLE_ID, b.STODJER_BOKNINGS_ID,  
+(       
+            (case 
+            when a.avslutat = 'J' and substr(a.avslut_dat,1,7) = a.period then a.avslut_dat 
+            when a.avslutat = 'J' and substr(a.avslut_dat,1,7) < a.period then to_date(a.period||'-01','YYYY-MM-DD') 
+            when a.pagaende = 'J' then  last_day(to_date(a.period||'-01','YYYY-MM-DD'))  --se till att slutdatumet eller avslutdatumet  givet att man lämnar ligger i månaden (behövs för att räkna ut deltagardagar)
+            else null  
+            end
+            ) 
+    - 
+            (case when substr(A.START_DAT,1,7) = period then a.start_dat   --se till att startdatumet givet att man är ny, ligger i månaden (behövs för att räkna ut deltagardagar) 
+            else to_date(period||'-01','YYYY-MM-DD') 
+            end
+            ) 
+    +1
+)  
+        lev_dagar_i_man,
+case when A.NY = 'J' then 1 else null end as ny,
+case when A.PAGAENDE  = 'J' then 1 else null end as kvar, 
+case when A.AVSLUTAT  = 'J' then 1 else null end as lamnat
+from MARTMAN.MARENDEUPPF_DM a
+join
+        DWMAN.ARENDEFAKTA b
+on a.lnr = B.LNR
+where 
+a.program_id = 'LEV'
+and a.spar_kod is not null 
+and substr(a.spar_kod,1,4) in ('A003', 'A004') 
+and period = substr(add_months(sysdate,-5),1,7)
+and period >= '2017-09'
+and (NY = 'J' or PAGAENDE  = 'J'  or AVSLUTAT  = 'J') 
+order by 1,3
+
+;
+
+--ta bort dubletter givet att man råkar köra samma månad två ggr 
+DELETE FROM IPSU_6 a WHERE (select distinct b.period from IPSU_1 b)  = a.period;
+COMMIT;
+
+
+--573
+
+
+--senaste unik kvar per månad måste kollas först (så att inte senaste ärendet felaktivt verkar vara att man lämnar)
+drop table ipsu_2_0a purge; 
+
+create table ipsu_2_0a as
+select period, spar_kod, person_id, max(arendelnr) max_arendelnr
+from ipsu_1 b
+where kvar = 1
+group by period, spar_kod, person_id
+;
+
+
+--senaste lämningen, givet att man  inte är kvar
+drop table ipsu_2_0b purge; 
+
+create table ipsu_2_0b as
+select period, spar_kod, person_id, max(arendelnr) max_arendelnr
+from ipsu_1 b
+where lamnat = 1
+and (period, spar_kod, person_id) not in (select distinct period, spar_kod, person_id from ipsu_2_0a) 
+group by period, spar_kod, person_id
+;
+
+
+--alla rader som antingen är ett innebär senaste ärendet är ett kvarsteånde, om man inte är kvar senaste ärendet  som innebär en lämning  
+drop table ipsu_2_0c purge; 
+
+create table ipsu_2_0c as
+select * from
+(select * from ipsu_2_0a
+union all  
+select * from ipsu_2_0b)
+
+;
+
+--master regeln start , bara behålla det senaste ärendet i månaden givet kvar och i andra hand senaste ärendet  där man lämnar 
+--(notera att ett slutdatum den sista dagen i månaden innan ger lämnat = 1 månaden efter)  
+--samt behålla ny statusen per person, period och tjänst(spår-variabeln) utan att behålla ärendet, samt räkna ut lite start och slut i månaden 
+--utnyttjar att martman.marendeupf_dm hanterar lämnatflaggan så att om man är kvar månaden innan, och inte har någon ny information månaden efter så lämnar man ändå månaden efter 
+--(i praktiken gäller detta endast sökande med avslut_dat den sista i månaden innan, efters som de då ansågs vara kvar) 
+drop table ipsu_2 purge; 
+
+create table ipsu_2 as
+
+select a.period, a.person_id, substr(a.spar_kod,1,4) tjanst ,  max_arendelnr, unik_ny_per_man, a.kvar, a.lamnat, forsta_kvar_dat_i_man, senaste_kvar_dat_i_man , 
+summa_dagar, planerat_slut - planerad_retroaktiv_start +1 planerade_retroaktiva_dagar, A.BESLKONTOR_KOD
+from ipsu_1 a
+left outer join
+        (select distinct period, spar_kod, person_id, ny unik_ny_per_man
+        from ipsu_1 b
+        where ny = 1) b
+on 
+a.period = b.period 
+and a.person_id  = b.person_id
+and a.spar_kod = b.spar_kod
+--left outer 
+join
+        ipsu_2_0c b2
+on 
+a.period = b2.period 
+and a.person_id  = b2.person_id
+and a.spar_kod = b2.spar_kod
+and A.ARENDELNR = b2.max_arendelnr
+left outer join
+        (select period, spar_kod, person_id, 
+        max(case when lamnat = 1  then avslut_dat when kvar = 1 then  last_day(to_date(period||'-01','YYYY-MM-DD')) else null  end) senaste_kvar_dat_i_man,
+        min(case when substr(A.START_DAT,1,7) = period then a.start_dat else to_date(period||'-01','YYYY-MM-DD') end) forsta_kvar_dat_i_man,
+        max(a.avslut_dat) planerat_slut,
+        min(A.START_DAT) planerad_retroaktiv_start,
+        sum(lev_dagar_i_man) summa_dagar 
+        from ipsu_1 a
+        group by period, spar_kod, person_id) b3
+on 
+a.period = b3.period 
+and a.person_id  = b3.person_id
+and a.spar_kod = b3.spar_kod
+order by 2,1,3
+
+;
+
+
+
+--behåll bi-information om t.ex. kön, STODJER_BOKNINGS_ID mm från det senaste ärendet i månaden för personen i tjänsten(spåret)  
+
+drop table ipsu_3 purge; 
+
+create table ipsu_3 as
+select 
+b.*,
+a.ARENDELNR,
+a.EKA_KATJANSTAVTALLNR,
+a.KOEN,
+--a.START_DAT,
+--a.AVSLUT_DAT,
+--UTBILDNINGSTILLFALLE_ID
+a.STODJER_BOKNINGS_ID
+--a.NY,
+--a.KVAR,
+--a.LAMNAT,
+from ipsu_1 a
+join
+        ipsu_2 b 
+on a.period = b.period 
+and a.arendelnr = b.max_arendelnr
+
+;
+
+
+
+
+
+
+
+--cursorn, bara för den aktuella månaden,
+
+drop table IPSU_4  purge;
+
+create table IPSU_4 as
+select distinct period, a.ARENDELNR, EKA_KATJANSTAVTALLNR, nvl(STODJER_BOKNINGS_ID,0) STODJER_BOKNINGS_ID, case when B.ARENDELNR is not null then 1 else 0 end handling_finns
+from ipsu_3 a
+left outer join
+        (select distinct arendelnr
+        from DWMAN.KA_HANDLING  b
+        where trunc(b.tr_dat)  <= last_day((select max(period) from ipsu_1)||'-01')
+        ) b
+on A.ARENDELNR = B.ARENDELNR
+where period = (select max(period) from ipsu_1)
+
+;
+
+
+
+
+-- cursorn hämtar endast senaste information i andra tabeller , främst i ka/tlr, och tar hänsyn till att man först måste ta max(tr_dat) och sen max(lnr) i ka/TLR
+
+drop table ipsu_max_lnr_per_ipsu_period purge;
+
+CREATE TABLE ipsu_max_lnr_per_ipsu_period (
+    period CHAR (7 CHAR),
+    ARENDELNR int, 
+    max_utf_verksamhet_lnr int,
+    leverantor_id number,
+    max_LEVERANTOR_LNR int,
+    leverantor_namn char(100),
+    ORGNR  char(10),
+    STODJER_BOKNINGS_ID int,
+    MAX_bokning_LNR int,
+    UTBILDNINGSTILLFALLE_ID int ,
+    utbildningstillfalle_lnr int,
+    utbildning_id number,
+    utbildning_lnr number,
+    HANDLING_LNR number,                                                          
+    HANDLING_ID number,
+    omfattning_LNR number
+);
+
+
+DECLARE
+v_radnummer int;
+v_ARENDELNR number;
+v_EKA_KATJANSTAVTALLNR int;
+v_man CHAR(7);
+v_Max_utf_verksamhet_tr_dat timestamp(6);
+v_max_utf_verksamhet_lnr int;
+v_leverantor_id number;
+v_Max_leverantor_tr_dat date;
+v_max_LEVERANTOR_LNR int;
+v_leverantor_namn  char(100);
+v_ORGNR  char(10);
+v_STODJER_BOKNINGS_ID int;
+v_Max_bokning_tr_dat date; 
+v_MAX_bokning_LNR int;
+v_UTBILDNINGSTILLFALLE_ID int;
+v_max_tlr_utbildningstillfalle_tr_dat date;
+v_utbildningstillfalle_lnr int;
+v_max_tlr_utbildning_tr_dat date;
+v_utbildning_id number;
+v_utbildning_lnr number;
+v_Max_handling_tr_dat date;
+v_max_HANDLING_LNR number;
+v_HANDLING_ID number;
+v_Max_omfattning_tr_dat date;
+v_max_omfattning_LNR number;
+v_handling_finns number; 
+
+
+
+
+        
+CURSOR c2 IS
+        SELECT  PERIOD, ARENDELNR, EKA_KATJANSTAVTALLNR, STODJER_BOKNINGS_ID, handling_finns
+        FROM IPSU_4
+        ORDER BY ARENDELNR;
+        
+BEGIN
+
+v_radnummer :=0;
+
+            FOR r2 IN c2 LOOP
+
+                                        v_man := substr(r2.period,1,7);
+                                        v_ARENDELNR := R2.ARENDELNR;
+                                        v_EKA_KATJANSTAVTALLNR := r2.EKA_KATJANSTAVTALLNR;
+                                        v_STODJER_BOKNINGS_ID := r2.STODJER_BOKNINGS_ID;
+                                        v_handling_finns := r2.handling_finns;
+                              
+
+
+                      begin
+                              v_radnummer := v_radnummer+1;
+
+                            v_Max_utf_verksamhet_tr_dat              := null;
+                            v_MAX_UTF_VERKSAMHET_LNR           := null;
+                            v_leverantor_id                                   := null;
+                            v_Max_leverantor_tr_dat                      := null;
+                            v_max_LEVERANTOR_LNR                    := null;
+                            v_ORGNR                                            := null; 
+                            v_leverantor_namn                              := null;
+                            v_Max_bokning_tr_dat                         :=null;
+                            v_MAX_bokning_LNR                           := null;
+                            v_UTBILDNINGSTILLFALLE_ID               := null;
+                            v_max_tlr_utbildningstillfalle_tr_dat      :=null;
+                            v_utbildningstillfalle_lnr                       := null;
+                            v_utbildning_id                                   := null;
+                            v_utbildning_lnr                                  := null;
+                            v_Max_handling_tr_dat                       := null;
+                            v_max_HANDLING_LNR                        := null;
+                            v_HANDLING_ID                                  := null;
+                            v_Max_omfattning_tr_dat                    := null;
+                            v_max_omfattning_LNR                      := null;
+
+
+                                    
+                                    SELECT MAX (b.tr_dat) into v_Max_utf_verksamhet_tr_dat --datumen i katlr sparas ofta på formatet YYYYMMDDHHMISS, det bör man behålla i syftet att  hitta senaste , förutom i vissa jämförelser med normala datum utan tid
+                                    FROM dwman.tlr_utf_verksamhet b
+                                    WHERE  
+                                    trunc(b.tr_dat)  <= last_day(v_man||'-01') -- notera  trunc(tr_dat), datumen i katlr sparas ofta på formatet YYYYMMDDHHMISS, det bör man behålla i syftet att  hitta senaste , förutom i vissa jämförelser med normala datum utan tid, t.ex. i detta where villkoret,
+                                    and v_EKA_KATJANSTAVTALLNR = B.UTF_VERKSAMHET_ID  
+                                    and b.avtal_id IS NOT NULL
+                                    ;
+                                    
+                                    
+                                    
+                                    SELECT MAX (utf_verksamhet_lnr) into v_MAX_UTF_VERKSAMHET_LNR
+                                    FROM dwman.tlr_utf_verksamhet b
+                                    WHERE  
+                                    to_char(v_Max_utf_verksamhet_tr_dat,'YYYYMMDDHHMISS') = to_char(b.tr_dat,'YYYYMMDDHHMISS') -- här var det viktigt att använda datum plus tid för att få rätt rad, givet att det fanns millisekundrar med som avgjorde vilket som senast
+                                    and v_EKA_KATJANSTAVTALLNR = B.UTF_VERKSAMHET_ID 
+                                    and b.avtal_id IS NOT NULL
+                                    ;
+                                    
+                                     
+
+                                    SELECT B.LEVERANTOR_ID into v_leverantor_id 
+                                    FROM dwman.tlr_utf_verksamhet b
+                                    WHERE v_MAX_UTF_VERKSAMHET_LNR = B.UTF_VERKSAMHET_LNR
+                                    ;
+                                    
+                                    
+                                    
+                                    SELECT MAX (b.tr_dat) into v_Max_leverantor_tr_dat
+                                    FROM dwman.tlr_leverantor b
+                                    WHERE  
+                                    trunc(b.tr_dat)  <= last_day(v_man||'-01')
+                                    and v_leverantor_id = B.leverantor_id
+                                    ;
+                                    
+                                    
+                                                                        
+                                    SELECT MAX(LEVERANTOR_LNR) into v_max_LEVERANTOR_LNR
+                                    FROM dwman.tlr_leverantor b
+                                    WHERE  
+                                    to_char(v_Max_leverantor_tr_dat,'YYYYMMDDHHMISS') = to_char(b.tr_dat,'YYYYMMDDHHMISS') --
+                                    and v_leverantor_id = B.leverantor_id
+                                    ;
+                                    
+                                    
+                                    
+                                    SELECT ORGNR, namn into v_ORGNR, v_leverantor_namn  
+                                    FROM dwman.tlr_leverantor b
+                                    WHERE  
+                                    v_max_LEVERANTOR_LNR = B.LEVERANTOR_LNR
+                                    ;
+                                    
+                                    
+                                    --gp, if för att undvika exception där man letar efter information om ärenden som inte ännu har handligar   
+                                    IF v_handling_finns <> 0  then
+                                    
+                                    
+                                    SELECT MAX (b.tr_dat) into v_Max_handling_tr_dat
+                                    FROM DWMAN.KA_HANDLING b
+                                    WHERE  
+                                    trunc(b.tr_dat)  <= last_day(v_man||'-01')
+                                    and v_ARENDELNR = b.ARENDELNR
+                                    ;
+                                                                        
+                                                                                                         
+                                    SELECT MAX(B.HANDLING_LNR ) into v_max_HANDLING_LNR
+                                    FROM DWMAN.KA_HANDLING b
+                                    WHERE  
+                                    to_char(v_Max_handling_tr_dat,'YYYYMMDDHHMISS') = to_char(b.tr_dat,'YYYYMMDDHHMISS') 
+                                    and v_ARENDELNR = b.ARENDELNR
+                                    ;
+                                                                   
+                                    select B.HANDLING_ID into v_HANDLING_ID 
+                                    from DWMAN.KA_HANDLING b
+                                    where B.HANDLING_LNR = v_max_HANDLING_LNR 
+                                    ;
+                                    
+                                         
+                                    SELECT MAX (b.tr_dat) into v_Max_omfattning_tr_dat
+                                    FROM DWMAN.KA_OMFATTNING b
+                                    WHERE  
+                                    trunc(b.tr_dat)  <= last_day(v_man||'-01')
+                                    and v_HANDLING_ID = b.HANDLING_ID
+                                    ;
+                                    
+                                    
+                                                                        
+                                    SELECT MAX(omfattning_LNR) into v_max_omfattning_LNR
+                                    FROM DWMAN.KA_OMFATTNING b
+                                    WHERE  
+                                    to_char(v_Max_omfattning_tr_dat,'YYYYMMDDHHMISS') = to_char(b.tr_dat,'YYYYMMDDHHMISS') --
+                                    and v_HANDLING_ID = b.HANDLING_ID
+                                    ;
+                                    
+                                    end if;
+                                    
+                                    
+                                    --gp slut        
+                                   
+                            
+                                   --det är inte alla ärenden som har en bokning, alla i spår a003 och vissa i spår a004 saknar informationen, det måste man hantera för att inte få exeption  
+                                   --ta reda på allt intressant om utbildnignen  ifråga
+                                    IF v_STODJER_BOKNINGS_ID <> 0 then  
+
+----
+
+                                    SELECT MAX(b.tr_dat) into v_Max_bokning_tr_dat
+                                    FROM dwman.TLR_BOKNING b
+                                    WHERE  
+                                    trunc(b.tr_dat)  <= last_day(v_man||'-01')
+                                    and v_STODJER_BOKNINGS_ID = B.BOKNING_ID
+                                    ;
+
+
+
+
+                                    SELECT MAX (BOKNING_LNR) into v_MAX_bokning_LNR
+                                    FROM dwman.TLR_BOKNING b
+                                    WHERE  
+                                    to_char(v_Max_bokning_tr_dat,'YYYYMMDDHHMISS') = to_char(b.tr_dat,'YYYYMMDDHHMISS')
+                                    and v_STODJER_BOKNINGS_ID = B.BOKNING_ID 
+                                    ;
+
+
+
+                                    select UTBILDNINGSTILLFALLE_ID into v_UTBILDNINGSTILLFALLE_ID
+                                    from DWMAN.TLR_BOKNING b
+                                    where B.BOKNING_lnr = v_MAX_bokning_LNR 
+                                    ;
+
+
+
+                                    SELECT MAX(tr_dat) into v_max_tlr_utbildningstillfalle_tr_dat
+                                    FROM dwman.tlr_utbildningstillfalle b
+                                    WHERE  
+                                    trunc(b.tr_dat)  <= last_day(v_man||'-01')
+                                    and b.UTBILDNINGSTILLFALLE_ID = v_UTBILDNINGSTILLFALLE_ID
+                                    ;
+
+
+
+                                    SELECT MAX(utbildningstillfalle_lnr) into v_utbildningstillfalle_lnr
+                                    FROM dwman.tlr_utbildningstillfalle b
+                                    WHERE
+                                    b.UTBILDNINGSTILLFALLE_ID = v_UTBILDNINGSTILLFALLE_ID
+                                    and to_char(v_max_tlr_utbildningstillfalle_tr_dat,'YYYYMMDDHHMISS') = to_char(b.tr_dat,'YYYYMMDDHHMISS')   
+                                    ;
+
+
+                                    select distinct utbildning_id into v_utbildning_id 
+                                    FROM dwman.tlr_utbildningstillfalle b
+                                    where b.utbildningstillfalle_lnr = v_utbildningstillfalle_lnr;
+                                    
+                                                                        
+                                                                        
+                                    SELECT MAX(tr_dat) into v_max_tlr_utbildning_tr_dat
+                                    FROM dwman.tlr_utbildning b
+                                    WHERE  
+                                    trunc(b.tr_dat)  <= last_day(v_man||'-01')
+                                    and b.utbildning_id = v_utbildning_id
+                                    ;
+
+
+
+                                    SELECT MAX(UTBILDNING_LNR) into v_UTBILDNING_LNR
+                                    FROM dwman.tlr_utbildning b
+                                    WHERE
+                                    b.UTBILDNING_ID = v_UTBILDNING_ID
+                                    and to_char(v_max_tlr_utbildning_tr_dat,'YYYYMMDDHHMISS') = to_char(b.tr_dat,'YYYYMMDDHHMISS')   
+                                    ; 
+                                    
+
+                                      END IF;
+                                     
+                                    
+--                                    select min( 
+--                                    from ipsu_3
+
+----------------------------------------------------------------------------
+
+                          --skriv informationen till en temp tabell som töms varje gång man kör skriptet för t.ex. en ny månad, vet inte om man kan creata en tabell i en cursor, så det fick bli såhär.
+                                      
+                                      INSERT INTO ipsu_max_lnr_per_ipsu_period 
+                                      select 
+                                                    v_man as PERIOD,
+                                                    v_ARENDELNR as  ARENDELNR,
+                                                    v_MAX_UTF_VERKSAMHET_LNR as MAX_UTF_VERKSAMHET_LNR,
+                                                    v_LEVERANTOR_ID as LEVERANTOR_ID,
+                                                    v_MAX_LEVERANTOR_LNR as MAX_LEVERANTOR_LNR,
+                                                    v_LEVERANTOR_NAMN as LEVERANTOR_NAMN,
+                                                    v_ORGNR as ORGNR,
+                                                    v_STODJER_BOKNINGS_ID as STODJER_BOKNINGS_ID, 
+                                                    v_MAX_BOKNING_LNR as MAX_BOKNING_LNR,
+                                                    v_UTBILDNINGSTILLFALLE_ID as UTBILDNINGSTILLFALLE_ID,
+                                                    v_UTBILDNINGSTILLFALLE_LNR as UTBILDNINGSTILLFALLE_LNR,
+                                                    v_utbildning_id as utbildning_id,
+                                                    v_UTBILDNING_LNR as UTBILDNING_LNR,
+                                                    v_max_HANDLING_LNR as HANDLING_LNR,                                                          
+                                                    v_HANDLING_ID as HANDLING_ID ,
+                                                    v_max_omfattning_LNR as omfattning_LNR
+                                                      from dual
+                                                      ; 
+--                                     commit;  
+
+                            
+
+
+
+                              ----------------------------------------------------------------------------------
+            --                  if v_radnummer> 200 then exit; end if;
+                              
+                                          EXCEPTION
+                                                WHEN NO_DATA_FOUND THEN dbms_output.Put_line('Fel');
+                                                WHEN OTHERS THEN
+                                                RAISE;
+                                   
+                                end;                       
+                    commit;
+
+            END LOOP;
+            commit;
+
+END;
+/
+
+
+--tabellen ipsu_5 har utgått i flödet 
+
+
+
+--select distinct period from ipsu_6
+
+
+
+--resultattabellen ipsu_6
+
+--drop table ipsu_6 purge;
+--truncate table ipsu_6;
+insert into ipsu_6
+--
+--create table ipsu_6 as
+select a.*, 
+b.MAX_UTF_VERKSAMHET_LNR,
+b.LEVERANTOR_ID,
+b.MAX_LEVERANTOR_LNR,
+b.LEVERANTOR_NAMN,
+b.ORGNR,
+--b.STODJER_BOKNINGS_ID,
+b.MAX_BOKNING_LNR,
+b.UTBILDNINGSTILLFALLE_ID,
+b.UTBILDNINGSTILLFALLE_LNR,
+b.UTBILDNING_ID,
+b.UTBILDNING_LNR,
+b.HANDLING_LNR,                                                          
+b.HANDLING_ID ,
+b.omfattning_LNR,
+C.AVTAL_ID
+from 
+ipsu_3 a
+left outer join 
+            ipsu_max_lnr_per_ipsu_period b
+on a.period = b.period
+and a.arendelnr = b.arendelnr 
+left outer join
+            (select distinct UTF_VERKSAMHET_LNR, avtal_id 
+            from DWMAN.TLR_UTF_VERKSAMHET 
+            ) c
+on b.MAX_UTF_VERKSAMHET_LNR = c.UTF_VERKSAMHET_LNR 
+
+;
+
+commit;
+
+--/*
+
+
+--sista delen av master-regeln, vill tillämpa ny-flagga borttaget eller nollningen, sist när all data för ny kvar lämnat är på plats
+
+UPDATE ipsu_6 a -- sista delen av masterregeln, ta bort Ny-flaggan om personen förekommer månaden innan utan Lämnat-flagga
+    SET a.UNIK_NY_PER_MAN = '0'
+    WHERE a.UNIK_NY_PER_MAN = '1'
+    AND EXISTS(SELECT b.* FROM ipsu_6 b WHERE b.person_id = a.person_id AND  b.period = SUBSTR(ADD_MONTHS(TO_DATE(a.period, 'yyyy-mm'),-1),1,7) and a.tjanst = b.tjanst AND b.kvar = '1');
+COMMIT;
+
+--masterregel tillämpad
+
+
+--cursorn nedan, så som masterregeln identifierar det, kopplar ihop insatser på hela ipsu_6 varje månad, eftersom cursorn tar hänsyn till att månader passerar,  dvs identifierar månaderna mellan ny och lämnat enligt masterregeln givet x antal kvarmånader det finns emellan
+
+--/*
+
+
+drop table ipsu_insats_lamningar purge;
+
+
+CREATE TABLE ipsu_insats_lamningar (
+    period CHAR (7 CHAR),
+    person_id number, 
+    tjanst VARCHAR2 (4 Char), 
+    lamnat int,
+    lagsta_start_i_insats date,
+    sista_slut_i_insats date,
+    antal_manader_i_insatsen int
+    
+);
+
+
+
+DECLARE
+v_radnummer int;
+v_person_id number;
+v_person_id2 number;
+v_man CHAR(7);
+v_tjanst varchar2(4);
+v_tjanst2 varchar2(4);
+v_antal_manader_i_insatsen int;
+v_lagsta_start_i_insats date;
+v_sista_slut_i_insats date;
+v_FORSTA_KVAR_DAT_I_MAN date;
+v_SENASTE_KVAR_DAT_I_MAN date;
+v_UNIK_NY_PER_MAN int; 
+V_KVAR int;
+V_LAMNAT int;
+
+
+        
+CURSOR c2 IS
+        SELECT distinct PERIOD, person_id, tjanst, A.FORSTA_KVAR_DAT_I_MAN, senaste_kvar_dat_i_man, A.UNIK_NY_PER_MAN, A.KVAR, A.LAMNAT
+        FROM ipsu_6 a
+        ORDER BY person_id, tjanst, period  asc;
+
+
+BEGIN
+
+v_radnummer :=0;
+v_person_id2 := 0;
+v_tjanst2 := 0;
+v_antal_manader_i_insatsen := 0;
+v_lagsta_start_i_insats := '3333-01-01'; --sätter datumvariablerna till stora felaktiga värden för att kunna felsöka om det skulle bli fel 
+v_sista_slut_i_insats := '3333-01-01';
+V_FORSTA_KVAR_DAT_I_MAN := '3333-01-01';
+v_senaste_kvar_dat_i_man := '3333-01-01'; 
+v_UNIK_NY_PER_MAN := 0; 
+V_KVAR := 0;
+V_LAMNAT:= 99;
+
+
+            FOR r2 IN c2 LOOP
+                  v_person_id := R2.person_id;
+                  v_tjanst := r2.tjanst;
+                  v_man := r2.period;
+                  V_FORSTA_KVAR_DAT_I_MAN := r2.FORSTA_KVAR_DAT_I_MAN;
+                  v_senaste_kvar_dat_i_man := r2.senaste_kvar_dat_i_man;
+                  v_UNIK_NY_PER_MAN := r2.UNIK_NY_PER_MAN ; 
+                  V_KVAR := r2.KVAR ;
+                  V_LAMNAT:= r2.lamnat;
+                      
+
+
+
+                      begin
+                              v_radnummer := v_radnummer+1;
+--                              v_antal_manader_i_insatsen := 0;
+--                              v_genomförda_dagar_i_insatsen := 0; 
+
+                               
+
+                              if v_UNIK_NY_PER_MAN =1 --and v_FORSTA_KVAR_DAT_I_MAN <= v_lagsta_start_i_insats
+                              then 
+                              v_lagsta_start_i_insats := v_FORSTA_KVAR_DAT_I_MAN; 
+                              v_sista_slut_i_insats := v_senaste_kvar_dat_i_man;
+                              v_person_id2 := r2.person_id; 
+                              v_tjanst2 := r2.tjanst;
+                              v_antal_manader_i_insatsen:=1;
+                              end if;
+                                                                                                
+
+--                                 dbms_output.Put_line(    v_senaste_kvar_dat_i_man||'  '||v_sista_slut_i_insats);
+                                    
+                                    if (
+                                            (
+                                                nvl(v_UNIK_NY_PER_MAN,0) <> 1) -- om man inte  är ny, utan är kvar eller lämnat så ska vi behålla ett nytt slutdatum för insatsen, och skriva det till  ipsu_insats_lamningar i nästa steg
+                                                and 
+                                                (v_KVAR = 1 or v_LAMNAT = 1)
+                                                and 
+                                                v_person_id = v_person_id2 --om det är samma person och tjänst som föregående månad/rad i cursorn så ska vi behålla ett nytt slutdatum för insatsen, och skriva det till  ipsu_insats_lamningar i nästa steg  
+                                                and  
+                                                v_tjanst = v_tjanst2 
+                                            ) 
+                                    then   
+                                    v_sista_slut_i_insats := v_senaste_kvar_dat_i_man;
+                                    v_antal_manader_i_insatsen:= v_antal_manader_i_insatsen+1;
+                                    end if;
+                                 
+--                                 dbms_output.Put_line(    v_senaste_kvar_dat_i_man||'  '||v_sista_slut_i_insats);
+
+
+----------------------------------------------------------------------------
+
+
+
+                                      INSERT INTO ipsu_insats_lamningar 
+                                      select 
+                                                    v_man as PERIOD,
+                                                    v_PERSON_ID as PERSON_ID,
+                                                    v_TJANST as tjanst,
+                                                    v_LAMNAT as LAMNAT,
+                                                    v_lagsta_start_i_insats as lagsta_start_i_insats,
+                                                    v_sista_slut_i_insats as sista_slut_i_insats,
+                                                    v_antal_manader_i_insatsen as antal_manader_i_insatsen 
+                                                    from dual
+                                                      ; 
+                                     commit;  
+
+
+                        
+
+                                      if v_person_id2 = r2.person_id and v_tjanst2 = r2.tjanst --and v_lamnat <> 1
+                                      then v_lamnat :=999 ;
+
+                                      else
+                                      v_person_id2 := r2.person_id;
+                                      v_TJANST2 := r2.TJANST;
+                                        
+                                    end if;    
+                        
+
+
+                              ----------------------------------------------------------------------------------
+            --                  if v_radnummer> 200 then exit; end if;
+                              
+                                               EXCEPTION --om skriptet går som det ska så kommer inte det finnas några exceptions
+                                                WHEN NO_DATA_FOUND THEN 
+--                                                dbms_output.Put_line('Fel');
+                                                dbms_output.Put_line('exception'||v_man ||' § '||v_PERSON_ID ||' § '||v_TJANST ||' § '|| 
+                                                v_lagsta_start_i_insats||' § '||
+                                                v_sista_slut_i_insats ||' § '||--v_antal_manader_i_insatsen||' § '||v_genomförda_dagar_i_insatsen||' § '||
+                                                v_radnummer ||' § '||--v_person_id2 ||' § '||v_tjanst2 ||' § '||
+                                                v_lamnat  
+                                                );
+                                                
+                                                WHEN OTHERS THEN
+                                                RAISE;
+                                                                      
+                                                                      
+                                          end;  
+                                
+
+                                   
+              
+                    commit;
+
+            END LOOP;
+            commit;
+
+END;
+/
+
+
+--select sum(UNIK_NY_PER_MAN) from ipsu_6 where tjanst = 'A003'
+--select count(*) from ipsu_6 where tjanst = 'A003' 
+--order by person_id, period
+
+
+--/*
+
+
+
+
+DROP TABLE IPSU_1_08 PURGE;
+CREATE TABLE IPSU_1_08 AS
+SELECT A.PERIOD, A.PERSON_ID, A.ARENDELNR, b.omrade_id, b.tjanst_id
+FROM IPSU_6 a
+left outer join 
+                    (SELECT avtal_id, omrade_id, tjanst_id
+                    FROM dwman.tlr_avtal
+                    WHERE (avtal_id, tr_dat, avtal_lnr) IN (SELECT avtal_id, tr_dat, MAX(avtal_lnr) avtal_lnr
+                                                                                FROM dwman.tlr_avtal
+                                                                                WHERE  trunc(tr_dat)  <=last_day((select max(period) from ipsu_1)||'-01')
+                                                                                            AND (avtal_id, tr_dat) IN (SELECT avtal_id, MAX (tr_dat) tr_dat
+                                                                                                                                  FROM dwman.tlr_avtal
+                                                                                                                                  WHERE  trunc(tr_dat)  <= last_day((select max(period) from ipsu_1)||'-01')
+                                                                                                                                  GROUP BY avtal_id)
+                                                                                                GROUP BY avtal_id, tr_dat) ) b
+          ON a.avtal_id=b.avtal_id
+where A.PERIOD = (select max(period) from ipsu_1)
+;     
+------------------------------------------------------------------------------------------------
+-- Hämta leveransområde
+------------------------------------------------------------------------------------------------
+-- Hämta alla leveransområden för STOM
+DROP TABLE IPSU_1_09_1 PURGE;
+CREATE TABLE IPSU_1_09_1 AS
+SELECT omrade_id, namn 
+FROM dwman.tlr_geoomrade
+WHERE (omrade_id, tr_dat, geoomrade_lnr) IN (SELECT omrade_id, tr_dat, MAX(geoomrade_lnr) geoomrade_lnr
+                                                                     FROM dwman.tlr_geoomrade
+                                                                     WHERE  (omrade_id, tr_dat) IN (SELECT omrade_id, MAX (tr_dat) tr_dat
+                                                                                                                    FROM dwman.tlr_geoomrade
+                                                                                                                    WHERE  trunc(tr_dat)  <= last_day((select max(period) from ipsu_1)||'-01')
+                                                                                                                                 AND tjanst_id in ('16', '17')
+                                                                                                                     GROUP BY omrade_id)
+                                                                      GROUP BY omrade_id, tr_dat) 
+;
+
+
+DROP TABLE IPSU_1_09 PURGE;
+CREATE TABLE IPSU_1_09 AS
+SELECT 
+PERIOD,
+PERSON_ID,
+ARENDELNR,
+a.OMRADE_ID,
+TJANST_ID, 
+b.namn leveransomrade
+FROM IPSU_1_08 a
+    INNER JOIN IPSU_1_09_1 b
+          ON a.omrade_id=b.omrade_id
+
+;
+
+
+
+
+--sluttabellen 
+
+drop table ipsu_pivot_detaljer purge;
+--truncate table ipsu_pivot_detaljer;
+--insert into ipsu_pivot_detaljer
+--
+
+create table ipsu_pivot_detaljer as
+select  
+a.    PERIOD    ,
+a.    PERSON_ID,
+a.    PERSON_ID +234234267 as p_id    ,
+a.    TJANST    ,
+a.    MAX_ARENDELNR    ,
+a.    UNIK_NY_PER_MAN    ,
+a.    KVAR    ,
+a.    LAMNAT    ,
+a.    FORSTA_KVAR_DAT_I_MAN    ,
+a.    SENASTE_KVAR_DAT_I_MAN    ,
+a.    SUMMA_DAGAR    ,
+a.    PLANERADE_RETROAKTIVA_DAGAR    ,
+--a.    ARENDELNR    ,
+a.    EKA_KATJANSTAVTALLNR    ,
+a.    KOEN    ,
+a.    STODJER_BOKNINGS_ID    ,
+a.    MAX_UTF_VERKSAMHET_LNR    ,
+a.    LEVERANTOR_ID    ,
+a.    MAX_LEVERANTOR_LNR    ,
+a.    LEVERANTOR_NAMN    ,
+a.    ORGNR    ,
+a.    MAX_BOKNING_LNR    ,
+a.    UTBILDNINGSTILLFALLE_ID    ,
+a.    UTBILDNINGSTILLFALLE_LNR    ,
+a.    UTBILDNING_ID    ,
+a.    UTBILDNING_LNR    ,
+a.    HANDLING_LNR,                                                          
+a.    HANDLING_ID ,
+a.    omfattning_LNR,
+a.    avtal_id,
+a.    BESLKONTOR_KOD,
+omr.leveransomrade,
+b.LAGSTA_START_I_INSATS,
+b.SISTA_SLUT_I_INSATS,  
+b.SISTA_SLUT_I_INSATS - b.LAGSTA_START_I_INSATS +1 antal_genomf_dagar_insatsen,
+case when b2.LAGSTA_START_I_INSATS is not null then 1 else null end ipsu_B_med_IPSU_A_innan,
+d.namn utbildningsnamn
+from 
+ipsu_6 a
+left outer
+join 
+        ipsu_insats_lamningar b
+on A.PERIOD = b.period
+and A.PERSON_ID = b.person_id
+and A.TJANST = b.tjanst
+left outer
+join
+        (select distinct A.PERSON_ID, a.tjanst, A.LAGSTA_START_I_INSATS --unika lägsta starter i respektive insats i ipsu b,  som följer högst 3 månader efter ipsu a:s sista slut i den respektive sammanhängande ipsu a insatsen
+        from ipsu_insats_lamningar a
+        join
+                (select distinct b2.PERSON_ID, B2.LAGSTA_START_I_INSATS,  b2.SISTA_SLUT_I_INSATS
+                from ipsu_insats_lamningar b2
+                where 
+                b2.LAMNAT = 1
+                and tjanst = 'A003') b2
+        on 
+        A.PERSON_ID = b2.person_id
+        and a.LAGSTA_START_I_INSATS between B2.LAGSTA_START_I_INSATS and last_day(ADD_MONTHS(b2.SISTA_SLUT_I_INSATS,3))
+        where 
+        A.PERIOD = substr(A.LAGSTA_START_I_INSATS,1,7) 
+        and tjanst = 'A004') b2 
+on 
+--A.PERIOD = b2.period
+A.PERSON_ID = b2.person_id
+and A.TJANST = b2.tjanst
+and b.LAGSTA_START_I_INSATS = b2.LAGSTA_START_I_INSATS -- det kan finnas fler lägsta starter , och flera månader gällande samma lägsta start  i samma insats, vi vill veta vilka som följer 3 månader efter
+left outer 
+join
+            IPSU_1_09 omr
+on A.PERIOD = omr.period
+--and A.PERSON_ID = omr.person_id
+and a.max_arendelnr = omr.arendelnr
+left outer 
+join
+            dwman.tlr_utbildningstillfalle c
+on  a.UTBILDNINGSTILLFALLE_LNR = c.UTBILDNINGSTILLFALLE_LNR 
+left outer
+join
+            DWMAN.TLR_UTBILDNING d
+on a.utbildning_lnr = d.utbildning_lnr
+order by max_arendelnr, a.person_id, a.period
+
+;
+
+
+
+
+
+
+
+--DWMAN.VF_TLR_TJANST
+
+
+/*
+
+select
+PERIOD    ,
+P_ID    ,
+TJANST    ,
+MAX_ARENDELNR    ,
+UNIK_NY_PER_MAN    ,
+KVAR    ,
+LAMNAT    ,
+FORSTA_KVAR_DAT_I_MAN    ,
+SENASTE_KVAR_DAT_I_MAN    ,
+SUMMA_DAGAR    ,
+PLANERADE_RETROAKTIVA_DAGAR    ,
+EKA_KATJANSTAVTALLNR    ,
+KOEN    ,
+STODJER_BOKNINGS_ID    ,
+LEVERANTOR_NAMN    ,
+ORGNR    ,
+UTBILDNINGSTILLFALLE_ID    ,
+UTBILDNING_ID    ,
+LAGSTA_START_I_INSATS    ,
+SISTA_SLUT_I_INSATS    ,
+ANTAL_GENOMF_DAGAR_INSATSEN    ,
+IPSU_B_MED_IPSU_A_INNAN    ,
+UTBILDNINGSNAMN    
+from
+ipsu_7 
+
+*/
+
+
+grant select on ipsu_pivot_detaljer to nonbb;
+
+
+/*
+
+-----------------------------------------------
+drop table AUB_FUB_PERIOD_NKL_INFO purge;
+
+create table AUB_FUB_PERIOD_NKL_INFO as
+select * from nonbb.AUB_FUB_PERIOD_NKL_INFO ;
+
+
+
+                    drop table AUB_FUB_PERIOD_NKL_INFO2 purge;
+
+                    create table AUB_FUB_PERIOD_NKL_INFO2  as
+                    select distinct a.period, a.person_id, utbildning_all, 1 as ipsu_pedagogiskt_stod
+                    from
+                    AUB_FUB_PERIOD_NKL_INFO a
+                    join
+                            IPSU_7 b 
+                    on a.person_id = b.person_id 
+                    and a.period >=b.period 
+                    and a.UTBILDNING_ALL = B.UTBILDNING_ID
+                    where a.period >= '2016-01' and a.LAMNAT = 1
+
+                    ;
+
+
+
+
+
+                    alter table  AUB_FUB_PERIOD_NKL_INFO 
+                    drop column ipsu_pedagogiskt_stod; 
+
+                    alter table AUB_FUB_PERIOD_NKL_INFO 
+                    add ipsu_pedagogiskt_stod int;
+
+                    update AUB_FUB_PERIOD_NKL_INFO a 
+                    set ipsu_pedagogiskt_stod = 1
+                    where a.period >= '2016-01' and a.LAMNAT = 1 and (a.period, a.person_id, a.utbildning_all) in (select distinct period, person_id, utbildning_all from AUB_FUB_PERIOD_NKL_INFO2)
+                    ; 
+                      
+                    commit;
+
+
+
+--
+--select a.*, case when 
+--from ipsu_7 a
+--MARTMAN.MARENDEUPPF_DM b
+--
+--
+--
+--             
+--             
+--
+
+--/*
+
+drop table AUB_FUB_PERIOD_NKL_INFO purge;
+
+create table AUB_FUB_PERIOD_NKL_INFO as
+select * from nonbb.AUB_FUB_PERIOD_NKL_INFO ;
+
+
+
+                    drop table AUB_FUB_PERIOD_NKL_INFO2 purge;
+
+                    create table AUB_FUB_PERIOD_NKL_INFO2  as
+                    select distinct a.period, a.person_id, utbildning_all, 1 as ipsu_pedagogiskt_stod
+                    from
+                    AUB_FUB_PERIOD_NKL_INFO a
+                    join
+                            IPSU_7 b 
+                    on a.person_id = b.person_id 
+                    and a.period >=b.period 
+                    and a.UTBILDNING_ALL = B.UTBILDNING_ID
+                    where a.period >= '2016-01' and a.LAMNAT = 1
+
+                    ;
+
+                    drop table AUB_FUB_PERIOD_NKL_INFO2 purge;
+
+                    create table AUB_FUB_PERIOD_NKL_INFO2  as
+                    
+                    select distinct a.period, a.person_id, utbildning_all, 1 as ipsu_pedagogiskt_stod
+                    from
+                    AUB_FUB_PERIOD_NKL_INFO a
+                    join
+                            (select  AA.BOKNING_ID, AA.UTBILDNINGSTILLFALLE_ID
+                            from DWMAN.TLR_BOKNING aa
+                            ) aa
+                     on a.UTBILDNINGSTILLFALLE_ID = aa.UTBILDNINGSTILLFALLE_ID
+                     join
+                            (select distinct arendelnr, B.STODJER_BOKNINGS_ID
+                            from DWMAN.ARENDEFAKTA b 
+                            where 
+                            STODJER_BOKNINGS_ID is not null
+                            and substr(B.SPAR_KOD,1,4) = 'A004'
+                            ) b
+                     on AA.BOKNING_ID = b.STODJER_BOKNINGS_ID
+                     join
+                            (select period, b2.arendelnr
+                            from MARTMAN.MARENDEUPPF_DM b2
+                            where substr(B2.SPAR_KOD,1,4) = 'A004'
+                            and B2.NY = 'J' or B2.PAGAENDE = 'J' or B2.AVSLUTAT = 'J'
+                            ) b2
+                    on b.arendelnr = B2.ARENDELNR
+                    and a.period = b2.period 
+                    where a.period >= '2016-01' and a.LAMNAT = 1
+
+
+
+                    alter table  AUB_FUB_PERIOD_NKL_INFO 
+                    drop column ipsu_pedagogiskt_stod; 
+
+                    alter table AUB_FUB_PERIOD_NKL_INFO 
+                    add ipsu_pedagogiskt_stod int;
+
+                    update AUB_FUB_PERIOD_NKL_INFO a 
+                    set ipsu_pedagogiskt_stod = 1
+                    where a.period >= '2016-01' and a.LAMNAT = 1 and (a.period, a.person_id, a.utbildning_all) in (select distinct period, person_id, utbildning_all from AUB_FUB_PERIOD_NKL_INFO2)
+                    ; 
+                      
+                    commit;
+
